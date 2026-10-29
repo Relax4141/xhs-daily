@@ -4,7 +4,7 @@
 流程：轻量对标检索 -> LLM 生成主/备文案 -> 生成 3 张配图 -> 写 data/today.js 与 data/schedule.js
 降级：任何环节失败都保留原有排期内容，页面始终有东西可发
 """
-import io, os, re, json, time, html, random, datetime, urllib.parse
+import io, os, re, sys, json, time, html, random, datetime, urllib.parse
 import requests
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -168,10 +168,8 @@ def save_schedule(obj):
 def main():
     d = today()
     sched = load_schedule()
-    exists = [x for x in sched["days"] if x.get("date") == d]
-    if exists and os.path.exists(os.path.join(ROOT, "images", d, "3.jpg")):
-        print("skip: %s 已有内容且配图齐全" % d)
-        return 0
+    # 每天重新生成（对标当天的信号），失败时保留原有排期内容作为降级
+    print("目标日期: %s" % d)
 
     column, topic = random.choice(TOPICS)
     print("选题:", column, topic)
@@ -192,9 +190,9 @@ def main():
             imgs.append("./images/%s/%d.jpg" % (d, i))
             print("[img ok]", d, i)
         time.sleep(2)
-    if not imgs:
-        print("[warn] 今日配图生成失败，页面将回退到排期/兜底图")
-        return 1
+    if len(imgs) < 3:
+        print("[warn] 今日配图不足 3 张(%d)，保留原有排期内容，本日不计入失败" % len(imgs))
+        return 0
 
     if f.get("BODY"):
         tags = f.get("TAGS", "").split() or FIXED_TAGS
