@@ -1,0 +1,48 @@
+name: 杨悦新小红书日更
+
+on:
+  schedule:
+    # 北京时间 08:35（UTC 00:35）
+    - cron: '35 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  models: read
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 配置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 安装依赖
+        run: pip install requests pillow
+
+      - name: 生成今日文案与配图
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python scripts/daily.py
+
+      - name: 补齐缺失配图
+        run: python scripts/genimg.py all
+
+      - name: 提交更新
+        run: |
+          git config user.name "xhs-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add data images
+          if git diff --cached --quiet; then
+            echo "无变更"
+          else
+            git commit -m "日更 $(TZ=Asia/Shanghai date +%F)"
+            git pull --rebase origin main
+            git push origin main
+          fi
