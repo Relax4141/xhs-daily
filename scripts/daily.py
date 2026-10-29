@@ -42,19 +42,47 @@ def today():
 
 
 # ---------- 1. 轻量对标信号 ----------
+# 站点导航/占位标题，不是真实笔记标题，必须过滤
+NOISE = ("生活兴趣社区", "小红书 -", "rednote", "Xiaohongshu", "创作服务平台",
+         "官网", "下载", "登录", "首页", "百度百科", "知乎")
+
+SOURCES = [
+    ("bing", "https://www.bing.com/search?q=", re.compile(r"<h2[^>]*>(.*?)</h2>", re.S)),
+    ("ddg", "https://lite.duckduckgo.com/lite/?q=", re.compile(r'class="result-link"[^>]*>(.*?)</a>', re.S)),
+]
+
+
+def clean_titles(raw_list):
+    out = []
+    for t in raw_list:
+        t = html.unescape(re.sub(r"<[^>]+>", "", t)).strip()
+        if not t or len(t) < 6 or len(t) > 42:
+            continue
+        if any(n.lower() in t.lower() for n in NOISE):
+            continue
+        if t.count("|") or t.count(" - "):
+            continue
+        if t not in out:
+            out.append(t)
+    return out[:5]
+
+
 def duibiao(keyword):
-    try:
-        u = "https://www.bing.com/search?q=" + urllib.parse.quote("小红书 " + keyword)
-        r = requests.get(u, timeout=25, headers={"User-Agent": "Mozilla/5.0"})
-        titles = re.findall(r"<h2[^>]*>(.*?)</h2>", r.text, re.S)[:6]
-        out = []
-        for t in titles:
-            t = html.unescape(re.sub(r"<[^>]+>", "", t)).strip()
-            if 4 < len(t) < 40:
-                out.append(t)
-        return "；".join(out[:4])
-    except Exception:
-        return ""
+    """多源轻量检索，取真实笔记标题作为对标信号；全部失败则返回空，由 LLM 按季节自行判断"""
+    for name, base, pat in SOURCES:
+        try:
+            u = base + urllib.parse.quote("小红书 " + keyword)
+            r = requests.get(u, timeout=25, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            if r.status_code != 200:
+                continue
+            got = clean_titles(pat.findall(r.text)[:12])
+            if got:
+                print("[duibiao] 来源=%s 条数=%d : %s" % (name, len(got), "；".join(got)[:100]), flush=True)
+                return "；".join(got[:4])
+        except Exception as e:
+            print("[duibiao] %s 异常: %s" % (name, str(e)[:80]), flush=True)
+    print("[duibiao] 全部检索源无有效结果，交由 LLM 按季节判断", flush=True)
+    return ""
 
 
 # ---------- 2. LLM 生成文案 ----------
@@ -66,20 +94,55 @@ SYS = (
 
 
 def llm(user):
-    """GitHub Models 优先，失败回退免费文本端点"""
+    """多引擎回退：GitHub Models -> pollinations OpenAI 兼容。
+    每一步失败原因都打印到日志，避免异常被吞掉无法排查。"""
+    attempts = []
+
     if GH_TOKEN:
-        try:
-            r = requests.post(
-                "https://models.inference.ai.azure.com/chat/completions",
-                headers={"Authorization": "Bearer " + GH_TOKEN, "Content-Type": "application/json"},
-                json={"model": "gpt-4o-mini", "messages": [
-                    {"role": "system", "content": SYS}, {"role": "user", "content": user}],
-                    "temperature": 0.85, "max_tokens": 1600},
-                timeout=120)
-            if r.status_code == 200:
-                return r.json()["choices"][0]["message"]["content"]
-        except Exception:
-            pass
+        for model in ["gpt-4o-mini", "gpt-4o", "Phi-3.5-mini-instruct"]:
+            try:
+                r = requests.post(
+                    "https://models.inference.ai.azure.com/chat/completions",
+                    headers={"Authorization": "Bearer " + GH_TOKEN,
+                             "Content-Type": "application/json"},
+                    json={"model": model,
+                          "messages": [{"role": "system", "content": SYS},
+                                       {"role": "user", "content": user}],
+                          "temperature": 0.85, "max_tokens": 1600},
+                    timeout=90)
+                if r.status_code == 200:
+                    c = r.json()["choices"][0]["message"]["content"]
+                    if c and len(c.strip()) > 50:
+                        print("[llm ok] model=%s len=%d" % (model, len(c)), flush=True)
+                        return c
+                    attempts.append("%s->EMPTY(len=%d)" % (model, len(c or "")))
+                else:
+                    attempts.append("%s->HTTP%d:%s" % (model, r.status_code,
+                                                       (r.text or "")[:100].replace("\n", " ")))
+            except Exception as e:
+                attempts.append("%s->EXC:%s" % (model, str(e)[:100]))
+
+    try:
+        r = requests.post(
+            "https://text.pollinations.ai/openai/chat/completions",
+            headers={"Content-Type": "application/json"},
+            json={"model": "openai",
+                  "messages": [{"role": "system", "content": SYS},
+                               {"role": "user", "content": user}],
+                  "temperature": 0.85, "max_tokens": 1600},
+            timeout=90)
+        if r.status_code == 200:
+            c = r.json()["choices"][0]["message"]["content"]
+            if c and len(c.strip()) > 50:
+                print("[llm ok] pollinations len=%d" % len(c), flush=True)
+                return c
+            attempts.append("pollinations->EMPTY")
+        else:
+            attempts.append("pollinations->HTTP%d:%s" % (r.status_code, (r.text or "")[:100]))
+    except Exception as e:
+        attempts.append("pollinations->EXC:%s" % str(e)[:100])
+
+    print("[llm FAIL] " + " | ".join(attempts)[:700], flush=True)
     return None
 
 
@@ -134,7 +197,7 @@ def make_image(prompt, seed, out):
         from PIL import Image, ImageFilter
     except Exception:
         return False
-    for i in range(3):
+    for i in range(5):
         try:
             r = requests.get(url, timeout=150)
             if r.status_code == 200 and len(r.content) > 8000:
@@ -176,7 +239,10 @@ def main():
     db = duibiao(topic)
     print("对标:", db[:120])
 
-    raw = llm(PROMPT.format(topic=topic, db=db or "无", column=column, sign=SIGN, fixed=" ".join(FIXED_TAGS)))
+    raw = llm(PROMPT.format(
+        topic=topic,
+        db=db or "（外部检索未取到有效结果，请结合当季气候、节气与女性日常处境自行判断当下热点）",
+        column=column, sign=SIGN, fixed=" ".join(FIXED_TAGS)))
     f = parse(raw) if raw else {}
     if not f.get("BODY") or len(f.get("BODY", "")) < 120:
         print("LLM 无有效输出，降级跳过文案生成")
@@ -190,9 +256,9 @@ def main():
             imgs.append("./images/%s/%d.jpg" % (d, i))
             print("[img ok]", d, i)
         time.sleep(2)
+    # 图与文案解耦：文案照常写入，缺图由后续 genimg.py all 补齐
     if len(imgs) < 3:
-        print("[warn] 今日配图不足 3 张(%d)，保留原有排期内容，本日不计入失败" % len(imgs))
-        return 0
+        print("[warn] 本次配图仅 %d/3 张，稍后由 genimg.py 补齐；文案正常更新" % len(imgs), flush=True)
 
     if f.get("BODY"):
         tags = f.get("TAGS", "").split() or FIXED_TAGS
@@ -205,7 +271,7 @@ def main():
                      "titles": [f.get("TITLE1", topic), f.get("TITLE2", topic), f.get("TITLE3", topic)],
                      "body": norm_body(f.get("BODY")), "tags": tags,
                      "keyword": f.get("KEYWORD", "慢慢来"), "postTime": "12:00-13:30 或 20:00-22:00"},
-            "images": imgs,
+            "images": ["./images/%s/%d.jpg" % (d, k) for k in (1, 2, 3)],
         }
         if f.get("ALT_BODY"):
             day["alt"] = {"theme": f.get("ALT_THEME", topic + "（备选）"),
