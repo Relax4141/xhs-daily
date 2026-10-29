@@ -234,6 +234,15 @@ def save_schedule(obj):
 def main():
     d = today()
     sched = load_schedule()
+
+    # 幂等保护：同一天已被当天云端生成过，则不重复劳动（供每日第二次触发兜底时判断）
+    already = [x for x in sched["days"] if x.get("date") == d]
+    if (already and "每日云生成" in already[0].get("basis", "")
+            and os.path.exists(os.path.join(ROOT, "images", d, "3.jpg"))
+            and os.environ.get("FORCE") != "1"):
+        print("skip: %s 今日已由云端生成且配图齐全，跳过（如需强制重生成设 FORCE=1）" % d, flush=True)
+        return 0
+
     # 每天重新生成（对标当天的信号），失败时保留原有排期内容作为降级
     print("目标日期: %s" % d)
 
