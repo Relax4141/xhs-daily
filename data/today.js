@@ -1,1 +1,1 @@
-window.TODAY_CLOUD = {"date": null};
+window.TODAY_CLOUD = {"date": "2026-10-30"};
