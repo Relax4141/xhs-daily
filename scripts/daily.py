@@ -60,6 +60,9 @@ def clean_titles(raw_list):
             continue
         if any(n.lower() in t.lower() for n in NOISE):
             continue
+        # 小红书笔记标题以中文为主，纯英文多为站点导航/SSO 占位页，丢弃
+        if not any("\u4e00" <= ch <= "\u9fff" for ch in t):
+            continue
         if t.count("|") or t.count(" - "):
             continue
         if t not in out:
